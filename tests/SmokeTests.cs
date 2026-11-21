@@ -29,6 +29,8 @@ namespace PawsOnKeys
                 new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
                 TestSettings(temp);
                 TestInput();
+                TestTypingRhythm();
+                TestTypingPoses();
                 TestPhoto(temp);
                 Check(DesktopInput.KeyLabel(0x53) == "S" && DesktopInput.KeyLabel(0x1b) == "Esc"
                     && DesktopInput.KeyLabel(0xa3) == "Ctrl", "physical key names");
@@ -72,8 +74,10 @@ namespace PawsOnKeys
                     Marshal.Copy(data, 0, ptr, data.Length);
                     Marshal.WriteInt32(ptr, 1);
                     Marshal.WriteInt16(ptr, header + 6, 83);
-                    input.DispatchPacket(ptr, (uint)data.Length);
-                    input.DispatchPacket(ptr, (uint)data.Length);
+                    // Holding one physical key can deliver enough repeats to cross the speed threshold.
+                    // Only the transition to down should reach the animation.
+                    for (int repeat = 0; repeat < 15; repeat++)
+                        input.DispatchPacket(ptr, (uint)data.Length);
                     Marshal.WriteInt16(ptr, header + 2, 1);
                     input.DispatchPacket(ptr, (uint)data.Length);
                     Marshal.WriteInt16(ptr, header + 2, 0);
@@ -87,6 +91,97 @@ namespace PawsOnKeys
                 }
                 finally { Marshal.FreeHGlobal(ptr); }
             }
+        }
+
+        private static void TestTypingRhythm()
+        {
+            var rhythm = new TypingRhythm();
+            for (int i = 0; i < 9; i++) rhythm.Press(.4 * i);
+            Check(!rhythm.Helping && rhythm.AgitatedSince < 0, "nine presses in four seconds are below 150 KPM");
+            rhythm.Press(3.6);
+            Check(rhythm.Helping && rhythm.AgitatedSince < 0, "ten presses activate the helping tail");
+
+            for (int i = 10; i < 19; i++) rhythm.Press(.4 * i);
+            Check(rhythm.Helping && rhythm.AgitatedSince < 0, "a brief fast streak does not trigger frantic swishing");
+            rhythm.Press(7.61);
+            Check(rhythm.AgitatedSince >= 0, "four more seconds of fast typing trigger the double slap");
+            rhythm.Update(8.9);
+            Check(!rhythm.Helping && rhythm.AgitatedSince < 0, "idle time resets both fast poses");
+
+            for (int i = 0; i < 10; i++) rhythm.Press(20 + i * .1);
+            rhythm.Press(80);
+            Check(!rhythm.Helping && rhythm.AgitatedSince < 0, "first press after a delayed frame starts a fresh streak");
+
+            for (int i = 1; i <= 9; i++) rhythm.Press(80 + i * .1);
+            Check(rhythm.Helping, "fast typing can start again after a long break");
+            rhythm.Reset();
+            rhythm.Press(81);
+            Check(!rhythm.Helping && rhythm.AgitatedSince < 0, "explicit reset discards previous typing activity");
+
+            var slowing = new TypingRhythm();
+            for (int i = 0; i < 10; i++) slowing.Press(.4 * i);
+            slowing.Update(4.5);
+            Check(slowing.Helping, "the tail keeps helping at eight recent presses");
+            slowing.Press(4.6);
+            slowing.Update(5.65);
+            Check(!slowing.Helping, "slowing below eight presses ends tail assistance before idle");
+        }
+
+        private static byte[] Region(PetView view, Int32Rect rect)
+        {
+            var bitmap = Render(view);
+            byte[] pixels = new byte[rect.Width * rect.Height * 4];
+            bitmap.CopyPixels(rect, pixels, rect.Width * 4, 0);
+            return pixels;
+        }
+
+        private static void TestTypingPoses()
+        {
+            double now = 0;
+            Func<double> clock = delegate { return now; };
+            var pet = new PetView(clock);
+            var calm = new PetView(clock);
+
+            // At the render scale of 512 x 460, this strip covers the left hind foot above the keyboard.
+            var hindPaws = new Int32Rect(174, 331, 43, 29);
+            pet.PressKey(32, "");
+            calm.PressKey(76, "");
+            now += .06;
+            pet.Tick(.06); calm.Tick(.06);
+            Check(!Region(pet, hindPaws).SequenceEqual(Region(calm, hindPaws)), "space and letter strikes have different lower-leg poses");
+
+            // The right edge above the keyboard contains the tail but no eye, key label or moving forepaw.
+            var tail = new Int32Rect(338, 236, 125, 123);
+            pet.ClearInput();
+            byte[] restingTail = Region(calm, tail);
+            bool sawTailAssist = false;
+            for (int i = 0; i < 14; i++)
+            {
+                now = 1 + .4 * i;
+                pet.PressKey((i % 2 == 0) ? 65 : 76, "");
+                now += .08;
+                pet.Tick(.08);
+                if (i >= 9 && !Region(pet, tail).SequenceEqual(restingTail)) sawTailAssist = true;
+            }
+            Check(sawTailAssist, "fast typing moves the tail even when floating labels are hidden");
+            pet.ClearInput();
+            Check(Region(pet, tail).SequenceEqual(restingTail), "clearing input immediately restores the resting tail");
+
+            // Space keeps the typing work on the hind foot. Tail movement in this sequence
+            // after several seconds must therefore come from the sustained-speed animation.
+            byte[] firstAgitated = null;
+            bool sawSwish = false;
+            for (int frame = 0; frame < 240; frame++)
+            {
+                now = 10 + frame * .05;
+                if (frame % 5 == 0) pet.PressKey(32, "");
+                pet.Tick(.05);
+                if (frame < 145 || frame % 3 != 0) continue;
+                byte[] current = Region(pet, tail);
+                if (firstAgitated == null) firstAgitated = current;
+                else if (!current.SequenceEqual(firstAgitated)) { sawSwish = true; break; }
+            }
+            Check(sawSwish, "sustained fast typing animates the tail independently of each key strike");
         }
 
         private static void TestSettings(string temp)
@@ -183,7 +278,10 @@ namespace PawsOnKeys
             editor.ShowInTaskbar = false;
             editor.WindowStartupLocation = WindowStartupLocation.Manual;
             editor.Left = -12000; editor.Top = -12000;
-            editor.Show(); editor.UpdateLayout(); editor.Close();
+            editor.Width = editor.MinWidth;
+            editor.Show(); editor.UpdateLayout();
+            Check(HasVisiblePrivacyNotice(editor), "local input privacy notice is visible at the minimum editor width");
+            editor.Close();
             Check(initial.Name == "小黑", "editor opens and cancellation preserves appearance");
             // The shell is explicitly paused, so this test never monitors live user input.
             var window = new PetWindow(new PetSettings { Paused = true, Configured = true });
@@ -192,6 +290,17 @@ namespace PawsOnKeys
             window.Dispatcher.Invoke(DispatcherPriority.Background, new Action(delegate {}));
             Check(window.Topmost && window.AllowsTransparency && !window.ShowInTaskbar, "desktop window lifecycle");
             window.Close();
+        }
+
+        private static bool HasVisiblePrivacyNotice(DependencyObject element)
+        {
+            var text = element as System.Windows.Controls.TextBlock;
+            if (text != null && text.IsVisible && text.ActualHeight > 0 && text.ActualWidth > 0
+                && text.Text.Contains("不保存按键历史") && text.Text.Contains("不上传按键"))
+                return true;
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(element); i++)
+                if (HasVisiblePrivacyNotice(VisualTreeHelper.GetChild(element, i))) return true;
+            return false;
         }
     }
 }

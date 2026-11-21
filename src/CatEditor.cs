@@ -15,6 +15,7 @@ namespace PawsOnKeys
 
         private readonly CatLook draft;
         private readonly PetView preview;
+        private readonly Button fastTypingButton;
         private readonly DispatcherTimer timer;
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private readonly StackPanel controls = new StackPanel();
@@ -28,7 +29,9 @@ namespace PawsOnKeys
         private readonly Button[] colors = new Button[3];
         private BitmapSource sourcePhoto;
         private double previous, petsUntil, moveUntil;
+        private double fastTypingUntil, nextDemoPress;
         private int sampleKey;
+        private const string DemoKeys = "ASDFJKL";
         private static readonly Brush Paper = Paint("#F8F6F1"), Ink = Paint("#292C28"), Green = Paint("#31573F"), Line = Paint("#DCDDD2");
         private static Brush Paint(string color)
         {
@@ -84,7 +87,15 @@ namespace PawsOnKeys
             apply.Padding = new Thickness(22, 8, 22, 8);
             DockPanel.SetDock(apply, Dock.Right);
             bottom.Children.Add(apply);
-            bottom.Children.Add(new Grid());
+            bottom.Children.Add(new TextBlock
+            {
+                Text = "桌角猫在本机读取当前键位来播放动画。不保存按键历史，也不上传按键。",
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 3, 12, 3),
+                Foreground = Paint("#526052"),
+                ToolTip = "右键托盘猫图标可暂停键鼠联动。单独隐藏上浮键名时，猫仍会跟着敲键。"
+            });
             var main = new Grid
             {
                 Margin = new Thickness(0, 10, 0, 0)
@@ -115,17 +126,11 @@ namespace PawsOnKeys
             {
                 Look = draft
             };
-            buttons.Children.Add(ButtonFor("敲键", delegate
-            {
-                int[] keys =
-                {
-                    65,
-                    83,
-                    68
-                };
-                int key = keys[sampleKey++ % keys.Length];
-                preview.PressKey(key, ((char)key).ToString());
-            }));
+            buttons.Children.Add(ButtonFor("敲键", DemoKeyPress));
+            buttons.Children.Add(ButtonFor("踩空格", delegate { preview.PressKey(32, "Space"); }));
+            fastTypingButton = ButtonFor("试试快打", delegate { SetFastTyping(fastTypingUntil == 0); });
+            fastTypingButton.ToolTip = "连续演示 9 秒，再点一次可提前停止";
+            buttons.Children.Add(fastTypingButton);
             buttons.Children.Add(ButtonFor("推鼠标", delegate
             {
                 moveUntil = clock.Elapsed.TotalSeconds + 1.7;
@@ -413,9 +418,35 @@ namespace PawsOnKeys
             preview.InvalidateVisual();
         }
 
+        private void DemoKeyPress()
+        {
+            char key = DemoKeys[sampleKey];
+            sampleKey = (sampleKey + 1) % DemoKeys.Length;
+            preview.PressKey(key, key.ToString());
+        }
+
+        private void SetFastTyping(bool enabled)
+        {
+            preview.ClearInput();
+            double now = clock.Elapsed.TotalSeconds;
+            fastTypingUntil = enabled ? now + 9 : 0;
+            nextDemoPress = now;
+            fastTypingButton.Content = enabled ? "停止快打" : "试试快打";
+        }
+
         private void OnFrame(object sender, EventArgs args)
         {
             double now = clock.Elapsed.TotalSeconds;
+            if (fastTypingUntil > 0)
+            {
+                if (now >= fastTypingUntil)
+                    SetFastTyping(false);
+                else if (now >= nextDemoPress)
+                {
+                    DemoKeyPress();
+                    nextDemoPress = now + 0.21;
+                }
+            }
             Point p = System.Windows.Input.Mouse.GetPosition(preview);
             bool demo = moveUntil > now;
             double dx = demo ? Math.Sin(now * 6) : 2 * p.X / Math.Max(1, preview.ActualWidth) - 1;
