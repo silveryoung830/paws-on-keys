@@ -31,7 +31,10 @@ namespace PawsOnKeys
         }
 
         private double time, aimX, aimY, x, y, affection, strike, mousePress;
-        private bool touching, pressing;
+        private bool pressing;
+        private Vector gazeTarget, gaze;
+        private double pettingRemaining;
+        private static readonly Point EyeMidpoint = new Point(160, 104.5);
         private Board.Cap key;
         private static readonly Point RestingForepaw = new Point(220, 269);
         private static readonly Point RestingFoot = new Point(149, 265);
@@ -56,12 +59,24 @@ namespace PawsOnKeys
             }
         }
 
-        public void SetPointer(double dx, double dy, bool down, bool petting)
+        public void SetPointer(double dx, double dy, bool down, Point local)
         {
             aimX = Math.Max(-1, Math.Min(1, dx));
             aimY = Math.Max(-1, Math.Min(1, dy));
             pressing = down;
-            touching = petting;
+            gazeTarget = new Vector();
+            Point facePoint;
+            if (!TryFacePoint(local, out facePoint)) return;
+            Vector direction = facePoint - EyeMidpoint;
+            double distance = direction.Length;
+            // Gradually lose interest as the pointer leaves the area around the cat.
+            double interest = Math.Max(0, Math.Min(1, (305 - distance) / 120));
+            gazeTarget = direction * (interest / Math.Max(30, distance));
+        }
+
+        public void PetHead()
+        {
+            pettingRemaining = .65;
         }
 
         public void PressKey(int vk, string label)
@@ -114,7 +129,9 @@ namespace PawsOnKeys
             time += d;
             x += (aimX - x) * k;
             y += (aimY - y) * k;
-            affection += ((touching ? 1 : 0) - affection) * (1 - Math.Exp(-9 * d));
+            gaze += (gazeTarget - gaze) * k;
+            affection += ((pettingRemaining > 0 ? 1 : 0) - affection) * (1 - Math.Exp(-9 * d));
+            pettingRemaining = Math.Max(0, pettingRemaining - d);
             mousePress += ((pressing ? 1 : 0) - mousePress) * k;
             strike = Math.Max(0, strike - d * 3.6);
             for (int i = echoes.Count - 1; i >= 0; i--)
@@ -138,8 +155,10 @@ namespace PawsOnKeys
             key = null;
             echoes.Clear();
             strike = 0;
-            touching = pressing = false;
-            mousePress = affection = 0;
+            pressing = false;
+            aimX = aimY = x = y = 0;
+            gazeTarget = gaze = new Vector();
+            mousePress = affection = pettingRemaining = 0;
             InvalidateVisual();
         }
 
@@ -167,21 +186,55 @@ namespace PawsOnKeys
             return start + (end - start) * reach;
         }
 
-        private double Scale
+        private Matrix ViewTransform
         {
             get
             {
-                return Math.Min(ActualWidth / 390.0, ActualHeight / 355.0);
+                double scale = Math.Min(ActualWidth / 390.0, ActualHeight / 355.0);
+                return new Matrix(scale, 0, 0, scale, (ActualWidth - 390 * scale) / 2, (ActualHeight - 355 * scale) / 2);
             }
         }
 
-        public bool IsHead(Point p)
+        private Matrix HeadTransform
         {
-            double s = Scale;
-            if (s <= 0)
-                return false;
-            double u = (p.X - (ActualWidth - 390 * s) / 2) / s, v = (p.Y - (ActualHeight - 355 * s) / 2) / s;
-            return u >= 109 && u <= 212 && v >= 49 && v <= 144 && ((u - 159) * (u - 159) / 3000.0 + (v - 103) * (v - 103) / 3400.0 <= 1.15);
+            get
+            {
+                Matrix matrix = Matrix.Identity;
+                matrix.Translate(0, -3 * affection + Math.Sin(time * 1.7) * .6);
+                matrix.RotateAt(-6 * affection, 162, 147);
+                return matrix;
+            }
+        }
+
+        private Geometry HeadShape { get { return slapPhase >= 0 && affection < .4 ? CrossFace : Face; } }
+
+        private Matrix FaceToView { get { return HeadTransform * ViewTransform; } }
+
+        internal Geometry HeadHitGeometry
+        {
+            get
+            {
+                Geometry hit = HeadShape.Clone();
+                hit.Transform = new MatrixTransform(FaceToView);
+                hit.Freeze();
+                return hit;
+            }
+        }
+
+        private bool TryFacePoint(Point local, out Point point)
+        {
+            point = local;
+            Matrix faceToView = FaceToView;
+            if (!faceToView.HasInverse) return false;
+            faceToView.Invert();
+            point = faceToView.Transform(local);
+            return true;
+        }
+
+        public bool IsHead(Point local)
+        {
+            Point facePoint;
+            return TryFacePoint(local, out facePoint) && HeadShape.FillContains(facePoint);
         }
 
         private static Brush MakeBrush(string hex)
@@ -286,10 +339,10 @@ namespace PawsOnKeys
         protected override void OnRender(DrawingContext d)
         {
             base.OnRender(d);
-            double s = Scale;
-            if (s <= 0)
+            Matrix view = ViewTransform;
+            if (!view.HasInverse)
                 return;
-            d.PushTransform(new MatrixTransform(s, 0, 0, s, (ActualWidth - 390 * s) / 2, (ActualHeight - 355 * s) / 2));
+            d.PushTransform(new MatrixTransform(view));
             var tailPen = new Pen(fur, 11)
             {
                 EndLineCap = PenLineCap.Round,
@@ -330,9 +383,8 @@ namespace PawsOnKeys
             double footReach = Reach(footAge);
             if (footReach == 0) Oval(d, fur, RestingFoot.X, RestingFoot.Y, 16, 9);
             Oval(d, fur, 226, 267, 17, 9);
-            d.PushTransform(new RotateTransform(-6 * affection, 162, 147));
-            d.PushTransform(new TranslateTransform(0, -3 * affection + Math.Sin(time * 1.7) * .6));
-            Geometry face = slapping && affection < .4 ? CrossFace : Face;
+            d.PushTransform(new MatrixTransform(HeadTransform));
+            Geometry face = HeadShape;
             d.DrawGeometry(fur, null, face);
             d.PushClip(face);
             if (look.LeftCheek)
@@ -357,7 +409,7 @@ namespace PawsOnKeys
                 if (open > .23)
                 {
                     d.PushClip(new EllipseGeometry(new Point(cx, cy), 13, 15 * open));
-                    Oval(d, Ink, cx + x * 7 + 2.5, cy + y * 8 + 2, 5.6, 8 * open);
+                    Oval(d, Ink, cx + gaze.X * 7, cy + gaze.Y * 7 * open, 5.6, 8 * open);
                     d.Pop();
                 }
 
@@ -366,7 +418,6 @@ namespace PawsOnKeys
                     Stroke(d, Whisker, .9, new Point(edge, 122 + j * 4), new Point(edge + dir * (9 + j * 1.5), 122 + j * 5));
             }
 
-            d.Pop();
             d.Pop();
             d.DrawDrawing(Keyboard);
             if (key != null && strike > .36)

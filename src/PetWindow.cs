@@ -18,7 +18,7 @@ namespace PawsOnKeys
         [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
         private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
         [DllImport("user32.dll")]
-        private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+        internal static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
 
         private readonly PetSettings settings;
         private readonly PetView pet;
@@ -28,6 +28,7 @@ namespace PawsOnKeys
         private readonly DispatcherTimer timer;
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private DesktopInput input;
+        private HeadInputWindow headInput;
         private CatEditor editor;
         private double lastTick, mousePulseUntil;
         private bool shuttingDown;
@@ -74,11 +75,17 @@ namespace PawsOnKeys
         private void Attach(object sender, EventArgs args)
         {
             handle = new WindowInteropHelper(this).Handle;
-            const int exStyle = -20;
-            SetWindowLong(handle, exStyle, GetWindowLong(handle, exStyle) | 0x20 | 0x80 | 0x08000000);
+            SetInputStyle(handle, true);
             PositionPet();
             input = new DesktopInput(HwndSource.FromHwnd(handle), OnKey, delegate { mousePulseUntil = clock.Elapsed.TotalSeconds + .12; });
             ApplyState();
+        }
+
+        internal static void SetInputStyle(IntPtr window, bool clickThrough)
+        {
+            const int exStyle = -20, transparent = 0x20, toolWindow = 0x80, noActivate = 0x08000000;
+            int style = GetWindowLong(window, exStyle) | toolWindow | noActivate;
+            SetWindowLong(window, exStyle, clickThrough ? style | transparent : style & ~transparent);
         }
 
         private void DisplayChanged(object sender, EventArgs args)
@@ -107,6 +114,7 @@ namespace PawsOnKeys
             int x = settings.Corner.EndsWith("L") ? rect.Left + gap : rect.Right - w - gap;
             int y = settings.Corner.StartsWith("T") ? rect.Top + gap : rect.Bottom - h - gap;
             SetWindowPos(handle, IntPtr.Zero, Math.Max(rect.Left, x), Math.Max(rect.Top, y), 0, 0, 0x15);
+            if (headInput != null) headInput.SyncBounds();
         }
 
         private void OnKey(int vk) { pet.PressKey(vk, settings.ShowKeys ? DesktopInput.KeyLabel(vk) : ""); }
@@ -122,9 +130,10 @@ namespace PawsOnKeys
                 double y = 2.0 * (pointer.Y - screen.Top) / Math.Max(1, screen.Height - 1) - 1.0;
                 Point local = pet.PointFromScreen(new Point(pointer.X, pointer.Y));
                 bool press = now < mousePulseUntil || DesktopInput.GetAsyncKeyState(1) < 0 || DesktopInput.GetAsyncKeyState(2) < 0;
-                pet.SetPointer(x, y, press, pet.IsHead(local));
+                pet.SetPointer(x, y, press, local);
             }
             pet.Tick(Math.Min(.1, Math.Max(0, now - lastTick)));
+            if (headInput != null) headInput.RefreshHead();
             lastTick = now;
         }
 
@@ -139,8 +148,20 @@ namespace PawsOnKeys
                 run = false;
                 ShowTip("键鼠联动暂停", ex.Message);
             }
-            if (run) { lastTick = clock.Elapsed.TotalSeconds; timer.Start(); }
-            else { timer.Stop(); pet.ClearInput(); mousePulseUntil = 0; }
+            if (run)
+            {
+                if (headInput == null) headInput = new HeadInputWindow(this, pet);
+                headInput.ShowForPet();
+                lastTick = clock.Elapsed.TotalSeconds;
+                timer.Start();
+            }
+            else
+            {
+                if (headInput != null && headInput.IsVisible) headInput.Hide();
+                timer.Stop();
+                pet.ClearInput();
+                mousePulseUntil = 0;
+            }
         }
 
         internal void OpenEditor()

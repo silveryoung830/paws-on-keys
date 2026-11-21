@@ -31,6 +31,7 @@ namespace PawsOnKeys
                 TestInput();
                 TestTypingRhythm();
                 TestTypingPoses();
+                TestGazeAndPetting();
                 TestPhoto(temp);
                 Check(DesktopInput.KeyLabel(0x53) == "S" && DesktopInput.KeyLabel(0x1b) == "Esc"
                     && DesktopInput.KeyLabel(0xa3) == "Ctrl", "physical key names");
@@ -252,22 +253,69 @@ namespace PawsOnKeys
             Check(opaque > 8000 && opaque < 190000 && first[3] == 0, "transparent desktop sprite");
             for (int y = 5; y < 460; y += 10)
                 for (int x = 5; x < 512; x += 10) if (pet.IsHead(new Point(x,y))) head++;
-            Check(head > 5 && head < 1000 && !pet.IsHead(new Point(-20,-20)), "head hover region");
+            Check(head > 5 && head < 1000 && !pet.IsHead(new Point(-20,-20)), "head hit region");
             pet.PressKey(65, "A"); pet.PressKey(83, "S"); pet.PressKey(68, "D");
-            pet.SetPointer(-.65,.42,true,false); pet.Tick(.04);
+            pet.SetPointer(-.65,.42,true,new Point(150, 185)); pet.Tick(.04);
             Check(!Pixels(Render(pet)).SequenceEqual(first), "mouse and typing pose changes");
-            var watching = new PetView { Look = new CatLook() };
-            var enjoying = new PetView { Look = new CatLook() };
-            watching.SetPointer(0,0,false,false); enjoying.SetPointer(0,0,false,true);
-            for (int i = 0; i < 22; i++) { watching.Tick(.03); enjoying.Tick(.03); }
-            Check(!Pixels(Render(watching)).SequenceEqual(Pixels(Render(enjoying))), "head hover changes pose without input");
             pet.ClearInput();
             var tux = pet.Look.Copy();
             tux.RightSock = true; tux.RightCheek = true; tux.Pattern = "tuxedo";
-            pet.Look = tux; pet.SetPointer(-.5,.2,false,false);
+            pet.Look = tux; pet.SetPointer(-.5,.2,false,new Point(155, 165));
             for (int i = 0; i < 24; i++) pet.Tick(.03);
             pet.PressKey(83,"S"); pet.Tick(.075);
             return pet;
+        }
+
+        private struct EyeSample
+        {
+            public int Area;
+            public double X, Y;
+        }
+
+        private static EyeSample SampleEye(PetView pet, Point pointer, int frames)
+        {
+            // Keep the screen-relative mouse position fixed on the right throughout this test.
+            pet.SetPointer(.8, .5, false, pointer);
+            for (int i = 0; i < frames; i++) pet.Tick(.03);
+            const int width = 55;
+            byte[] eye = Region(pet, new Int32Rect(151, 103, width, 69));
+            var sample = new EyeSample();
+            for (int i = 0; i < eye.Length; i += 4)
+            {
+                // The lime iris distinguishes the eye from both the pupil and the dark coat.
+                if (eye[i + 1] < 170 || eye[i + 2] < 150 || eye[i] > 150) continue;
+                sample.Area++;
+                sample.X += (i / 4) % width;
+                sample.Y += (i / 4) / width;
+            }
+            if (sample.Area > 0) { sample.X /= sample.Area; sample.Y /= sample.Area; }
+            return sample;
+        }
+
+        private static void TestGazeAndPetting()
+        {
+            var pet = new PetView();
+            Render(pet); // Arrange before converting pointer positions into cat coordinates.
+            var head = new Point(210, 90);
+            Check(pet.IsHead(head), "test pointer rests on the forehead");
+            var left = SampleEye(pet, new Point(145, 136), 16);
+            var right = SampleEye(pet, new Point(270, 136), 16);
+            var up = SampleEye(pet, head, 16);
+            var down = SampleEye(pet, new Point(210, 200), 16);
+            // As the dark pupil moves toward the pointer, the visible iris shifts the other way.
+            Check(left.X > right.X + 1 && up.Y > down.Y + 1, "pupils follow the local pointer on both axes");
+            Check(up.Area > 500, "hovering over the forehead leaves the eye open");
+            var farLeft = SampleEye(pet, new Point(-1500, 136), 24);
+            var farRight = SampleEye(pet, new Point(1800, 136), 24);
+            Check(Math.Abs(farRight.X - farLeft.X) < .4 && farLeft.X > right.X + .5 && farRight.X < left.X - .5,
+                "gaze settles in the middle when the pointer leaves either side");
+
+            pet.PetHead();
+            var happy = SampleEye(pet, head, 12);
+            Check(happy.Area < up.Area * .4, "a single head press produces a visible slow squint");
+            var recovered = SampleEye(pet, head, 56);
+            Check(recovered.Area > up.Area * .9 && Math.Abs(recovered.Y - up.Y) < 1.5,
+                "eyes reopen and track the pointer while it remains over the head");
         }
 
         private static void TestEditorAndWindow()
@@ -289,7 +337,78 @@ namespace PawsOnKeys
             window.Show();
             window.Dispatcher.Invoke(DispatcherPriority.Background, new Action(delegate {}));
             Check(window.Topmost && window.AllowsTransparency && !window.ShowInTaskbar, "desktop window lifecycle");
-            window.Close();
+            try { TestHeadWindow(window); }
+            finally { window.Close(); }
+
+            // Show and hide synchronously without pumping live input messages.
+            var running = new PetWindow(new PetSettings { Configured = true }) { Opacity = 0 };
+            try
+            {
+                running.Show();
+                var head = running.OwnedWindows.OfType<HeadInputWindow>().Single();
+                Check(head.IsVisible, "starting the desktop pet also enables its head target");
+                running.Hide();
+                Check(!head.IsVisible, "hiding the desktop pet removes its head target");
+                running.Show();
+                Check(head.IsVisible, "showing the desktop pet restores the same head target");
+            }
+            finally { running.Close(); }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr WindowFromPoint(DesktopInput.ScreenPoint point);
+
+        [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+        private static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong(IntPtr hwnd, int index);
+
+        private static IntPtr WindowAt(PetView pet, int designX, int designY)
+        {
+            double scale = Math.Min(pet.ActualWidth / 390, pet.ActualHeight / 355);
+            Point screen = pet.PointToScreen(new Point(
+                (pet.ActualWidth - 390 * scale) / 2 + designX * scale,
+                (pet.ActualHeight - 355 * scale) / 2 + designY * scale));
+            return WindowFromPoint(new DesktopInput.ScreenPoint {
+                X = (int)Math.Round(screen.X), Y = (int)Math.Round(screen.Y)
+            });
+        }
+
+        private static void TestHeadWindow(PetWindow window)
+        {
+            var pet = (PetView)window.Content;
+            var overlay = new HeadInputWindow(window, pet);
+            try
+            {
+                overlay.ShowForPet();
+                overlay.SyncBounds();
+                IntPtr handle = new WindowInteropHelper(overlay).Handle;
+                var wait = System.Diagnostics.Stopwatch.StartNew();
+                // Layered windows first become hittable after WPF presents their pixels.
+                do
+                {
+                    window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(delegate {}));
+                    if (WindowAt(pet, 160, 78) == handle) break;
+                    System.Threading.Thread.Sleep(15);
+                } while (wait.ElapsedMilliseconds < 2000);
+                Check(handle != IntPtr.Zero && WindowAt(pet, 160, 78) == handle, "Windows routes forehead hits to the pet");
+                Check((GetWindowLong(handle, -20) & 0x08000000) != 0 &&
+                    SendMessage(handle, 0x21, IntPtr.Zero, new IntPtr(0x02010001)).ToInt32() == 3,
+                    "petting the head keeps the active application focused");
+                Check(WindowAt(pet, 160, 47) != handle && WindowAt(pet, 180, 190) != handle
+                    && WindowAt(pet, 260, 293) != handle && WindowAt(pet, 35, 40) != handle,
+                    "ear gap, body, keyboard and blank space are click-through");
+                // Deliver the button message only to our own test window.
+                SendMessage(handle, 0x0201, new IntPtr(1), IntPtr.Zero);
+                overlay.Hide();
+                Check(WindowAt(pet, 160, 78) != handle, "hiding the petting target restores forehead click-through");
+                var head = new Point(210, 90);
+                var squint = SampleEye(pet, head, 12);
+                var open = SampleEye(pet, head, 56);
+                Check(open.Area > 500 && squint.Area < open.Area * .4, "native left press triggers the squint and recovery");
+            }
+            finally { overlay.Close(); }
         }
 
         private static bool HasVisiblePrivacyNotice(DependencyObject element)

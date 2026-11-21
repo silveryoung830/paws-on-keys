@@ -28,7 +28,7 @@ namespace PawsOnKeys
         private readonly ComboBox samplePart = new ComboBox();
         private readonly Button[] colors = new Button[3];
         private BitmapSource sourcePhoto;
-        private double previous, petsUntil, moveUntil;
+        private double previous, moveUntil;
         private double fastTypingUntil, nextDemoPress;
         private int sampleKey;
         private const string DemoKeys = "ASDFJKL";
@@ -135,10 +135,7 @@ namespace PawsOnKeys
             {
                 moveUntil = clock.Elapsed.TotalSeconds + 1.7;
             }));
-            buttons.Children.Add(ButtonFor("摸头", delegate
-            {
-                petsUntil = clock.Elapsed.TotalSeconds + 1.6;
-            }));
+            buttons.Children.Add(ButtonFor("摸头", preview.PetHead));
             var canvas = new Border
             {
                 Background = Paint("#DCDCD6"),
@@ -147,6 +144,14 @@ namespace PawsOnKeys
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(8),
                 Child = preview
+            };
+            canvas.MouseLeftButtonDown += delegate (object sender, System.Windows.Input.MouseButtonEventArgs args)
+            {
+                if (preview.IsHead(args.GetPosition(preview)))
+                {
+                    preview.PetHead();
+                    args.Handled = true;
+                }
             };
             stage.Children.Add(canvas);
             BuildPhoto();
@@ -451,7 +456,7 @@ namespace PawsOnKeys
             bool demo = moveUntil > now;
             double dx = demo ? Math.Sin(now * 6) : 2 * p.X / Math.Max(1, preview.ActualWidth) - 1;
             double dy = demo ? Math.Cos(now * 6) : 2 * p.Y / Math.Max(1, preview.ActualHeight) - 1;
-            preview.SetPointer(dx, dy, false, petsUntil > now || preview.IsHead(p));
+            preview.SetPointer(dx, dy, false, p);
             preview.Tick(Math.Min(.1, now - previous));
             previous = now;
         }
