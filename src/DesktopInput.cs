@@ -31,7 +31,7 @@ namespace PawsOnKeys
         private readonly HashSet<int> held = new HashSet<int>();
         private readonly uint headerSize = (uint)Marshal.SizeOf(typeof(Header));
         private IntPtr buffer = Marshal.AllocHGlobal(128);
-        private bool active;
+        private bool active, registered;
 
         internal DesktopInput(HwndSource window, Action<int> onKey, Action onMouse)
         {
@@ -43,14 +43,16 @@ namespace PawsOnKeys
 
         internal void Enable(bool value)
         {
-            if (value == active) return;
+            // Stop dispatching immediately, even if Windows cannot unregister the devices.
+            if (!value) { active = false; held.Clear(); }
+            if (registered == value) { active = value; return; }
             var devices = new Device[2];
             for (int i = 0; i < devices.Length; i++)
                 devices[i] = new Device { Page = 1, Usage = (ushort)(i == 0 ? 6 : 2), Flags = value ? 0x100u : 1u, Target = value ? source.Handle : IntPtr.Zero };
             if (!RegisterRawInputDevices(devices, 2, (uint)Marshal.SizeOf(typeof(Device))))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             held.Clear();
-            active = value;
+            registered = active = value;
         }
 
         private IntPtr HandleMessage(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp, ref bool handled)
@@ -114,7 +116,8 @@ namespace PawsOnKeys
 
         public void Dispose()
         {
-            try { if (active) Enable(false); }
+            try { if (registered) Enable(false); }
+            catch (Win32Exception) { /* the HWND is being destroyed */ }
             finally
             {
                 source.RemoveHook(HandleMessage);

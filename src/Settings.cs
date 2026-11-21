@@ -81,6 +81,7 @@ namespace PawsOnKeys
                 PetSettings settings;
                 using (XmlReader reader = XmlReader.Create(file, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, MaxCharactersInDocument = 50000 }))
                     settings = (PetSettings)new XmlSerializer(typeof(PetSettings)).Deserialize(reader);
+                if (settings == null) return new PetSettings();
                 if (settings.Cat == null) settings.Cat = new CatLook();
                 settings.Cat.Normalize();
                 if (settings.Corner != "BL" && settings.Corner != "TL" && settings.Corner != "TR") settings.Corner = "BR";
